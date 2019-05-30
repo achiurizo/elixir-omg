@@ -39,6 +39,7 @@ defmodule OMG.Watcher.ExitProcessor.Core do
   alias OMG.Watcher.ExitProcessor.ExitInfo
   alias OMG.Watcher.ExitProcessor.InFlightExitInfo
   alias OMG.Watcher.ExitProcessor.StandardExitChallenge
+  alias OMG.Watcher.ExitProcessor.Tools
   alias OMG.Watcher.ExitProcessor.Tools.DoubleSpend
   alias OMG.Watcher.ExitProcessor.Tools.KnownTx
   alias OMG.Watcher.ExitProcessor.TxAppendix
@@ -820,7 +821,7 @@ defmodule OMG.Watcher.ExitProcessor.Core do
   defp all_double_spends_by_index(indexed_utxo_positions, known_txs, ife) do
     # Will find all spenders of provided indexed inputs.
     known_txs
-    |> Stream.filter(&txs_different(ife.tx, &1.signed_tx))
+    |> Stream.filter(&Tools.txs_different(ife.tx, &1.signed_tx))
     |> Stream.flat_map(&double_spends_from_known_tx(indexed_utxo_positions, &1))
     |> Enum.group_by(& &1.index)
   end
@@ -851,9 +852,9 @@ defmodule OMG.Watcher.ExitProcessor.Core do
     ifes
     |> Map.values()
     # TODO: expensive!
-    |> Stream.map(fn ife -> {ife, Enum.find_value(known_txs, &competitor_for(ife.tx, &1))} end)
-    |> Stream.filter(fn {_ife, double_spend} -> !is_nil(double_spend) end)
-    |> Stream.filter(fn {ife, %DoubleSpend{known_tx: %KnownTx{utxo_pos: utxo_pos}}} ->
+    |> Stream.map(fn ife -> {ife, find_competitor(known_txs, ife.tx)} end)
+    |> Stream.filter(fn {_ife, maybe_competitor} -> match?({:ok, _}, maybe_competitor) end)
+    |> Stream.filter(fn {ife, {:ok, %DoubleSpend{known_tx: %KnownTx{utxo_pos: utxo_pos}}}} ->
       InFlightExitInfo.is_viable_competitor?(ife, utxo_pos)
     end)
     |> Stream.map(fn {ife, _double_spend} -> Transaction.raw_txbytes(ife.tx) end)
@@ -1046,26 +1047,16 @@ defmodule OMG.Watcher.ExitProcessor.Core do
     |> Block.inclusion_proof(txindex)
   end
 
-  defp find_competitor(known_txs, signed_ife_tx) do
-    known_txs
-    |> Enum.find_value(fn known -> competitor_for(signed_ife_tx, known) end)
+  defp find_competitor(known_txs_by_input, signed_ife_tx) do
+    # FIXME: not there yet - the name's off. If the processing that follows is moved out then name is fine
+    known_txs_by_input
+    |> KnownTx.group_txs_by_input()
+    |> KnownTx.find_competitor(signed_ife_tx)
     |> case do
       nil -> {:error, :competitor_not_found}
       value -> {:ok, value}
     end
   end
-
-  # Tells whether a single transaction is a competitor for another single transactions, by returning nil or the
-  # `DoubleSpend` information package if the `known_tx` is in fact a competitor
-  # Returns single result, even if there are multiple double-spends!
-  defp competitor_for(tx, %KnownTx{signed_tx: known_signed_tx} = known_tx) do
-    with true <- txs_different(tx, known_signed_tx) || nil,
-         double_spends = tx |> Transaction.get_inputs() |> Enum.with_index() |> double_spends_from_known_tx(known_tx),
-         true <- !Enum.empty?(double_spends) || nil,
-         do: hd(double_spends)
-  end
-
-  defp txs_different(tx1, tx2), do: Transaction.raw_txhash(tx1) != Transaction.raw_txhash(tx2)
 
   defp get_known_txs(%__MODULE__{} = state) do
     TxAppendix.get_all(state)

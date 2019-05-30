@@ -32,10 +32,75 @@ defmodule OMG.Watcher.ExitProcessor.Tools do
     """
     defstruct [:signed_tx, :utxo_pos]
 
+    alias OMG.Watcher.ExitProcessor.Tools
+
     @type t() :: %__MODULE__{
             signed_tx: Transaction.Signed.t(),
             utxo_pos: Utxo.Position.t() | nil
           }
+
+    @doc """
+
+
+    When grouping it keeps only the oldest transaction found
+    """
+    # FIXME docs
+    def group_txs_by_input(all_known_txs) do
+      all_known_txs
+      # FIXME: streamify? remove the empty map too
+      |> Enum.map(& &1)
+      |> IO.inspect()
+      |> Enum.map(&{&1, Transaction.get_inputs(&1.signed_tx)})
+      |> Enum.flat_map(fn {known_tx, inputs} -> for input <- inputs, do: {input, known_tx} end)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      # FIXME this
+      # this should not be necessary - group_by preserves order and the all_known_txs were sorted on start but rethink
+      |> Enum.into(%{}, fn {input, known_txs} -> {input, Enum.sort(known_txs, &is_older?/2)} end)
+      |> IO.inspect()
+    end
+
+    # FIXME: unused now, remove
+    defp group_picking_only_oldest(stream) do
+      stream
+      |> Enum.reduce(%{}, fn {input, %KnownTx{} = known_tx}, acc ->
+        Map.update(acc, input, known_tx, fn current_oldest_known_tx ->
+          case current_oldest_known_tx do
+            nil -> known_tx
+            _ -> if is_older?(known_tx, current_oldest_known_tx), do: known_tx, else: current_oldest_known_tx
+          end
+        end)
+      end)
+    end
+
+    @doc """
+
+
+    `known_txs_by_input` are assumed to hold _the oldest_ transaction spending given input for every input
+    """
+    # FIXME docs
+    def find_competitor(known_txs_by_input, tx) do
+      inputs = Transaction.get_inputs(tx)
+
+      known_txs_by_input
+      |> Map.take(inputs)
+      # FIXME: consider streamifying
+      |> Enum.map(fn {_input, spending_txs} -> spending_txs end)
+      |> Enum.filter(&Tools.txs_different(tx, &1.signed_tx))
+      |> Enum.sort(&is_older?/2)
+      |> Enum.at(0)
+      |> case do
+        nil -> nil
+        known_tx -> inputs |> Enum.with_index() |> Tools.double_spends_from_known_tx(known_tx) |> hd()
+      end
+    end
+
+    defp is_older?(%KnownTx{utxo_pos: utxo_pos1}, %KnownTx{utxo_pos: utxo_pos2}) do
+      cond do
+        is_nil(utxo_pos1) -> false
+        is_nil(utxo_pos2) -> true
+        true -> Utxo.Position.encode(utxo_pos1) < Utxo.Position.encode(utxo_pos2)
+      end
+    end
   end
 
   defmodule DoubleSpend do
@@ -105,4 +170,6 @@ defmodule OMG.Watcher.ExitProcessor.Tools do
     {:ok, sig} = find_sig(tx, owner)
     sig
   end
+
+  def txs_different(tx1, tx2), do: Transaction.raw_txhash(tx1) != Transaction.raw_txhash(tx2)
 end
